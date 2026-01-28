@@ -1,4 +1,4 @@
-# 📌 Breaking Gradient Temporal Collinearity for Robust Spiking Neural Networks (<a href="https://openreview.net/forum?id=udTDFAshNM&noteId=udTDFAshNM">ICLR 2026</a>)
+# Breaking Gradient Temporal Collinearity for Robust Spiking Neural Networks (<a href="https://openreview.net/forum?id=udTDFAshNM&noteId=udTDFAshNM">ICLR 2026</a>)
 
 
 **Desong Zhang, Jia Hu, Geyong Min**  
