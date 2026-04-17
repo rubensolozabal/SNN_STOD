@@ -23,9 +23,11 @@ class PatchwiseQModule(nn.Module):
 
     def transform(self, x):
         B, C, H, W = x.shape
-        patches = x.unfold(2, self.p, self.p) \.unfold(3, self.p, self.p)
+        patches = x.unfold(2, self.p, self.p) \
+        .unfold(3, self.p, self.p)
         Hp, Wp = patches.size(2), patches.size(3)
-        patches = patches.permute(0,2,3,1,4,5) \.reshape(B*Hp*Wp, -1)
+        patches = patches.permute(0,2,3,1,4,5) \
+        .reshape(B*Hp*Wp, -1)
         return patches, Hp, Wp, B, H, W
 
     def fold(self, patches, Hp, Wp, B, H, W):

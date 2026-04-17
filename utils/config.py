@@ -1,6 +1,7 @@
 import argparse
 import random
 import numpy as np
+from utils import numpy_compat
 import os
 import torch
 import torch.utils.data as data
@@ -48,7 +49,7 @@ def get_args():
     parser.add_argument('-p', type=int, default=8, help='number of patch')
 
     # Adv
-    parser.add_argument('-attack', default='fgsm', type=str, help='attack mode: empty, fgsm, or pgd')
+    parser.add_argument('-attack', default='', type=str, help='attack mode: empty, fgsm, or pgd')
     parser.add_argument('-eps', default=2, type=float, metavar='N', help='attack eps')
 
     # PGD
@@ -163,6 +164,5 @@ def get_net(surrogate='tri', dataset='cifar10', model='vgg5', num_classes=10, dr
     print('Total Parameters: %.2fM' % (sum(p.numel() for p in net.parameters()) / 1000000.0))
     net.cuda()
     return net
-
 
 

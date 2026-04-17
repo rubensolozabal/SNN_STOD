@@ -1,4 +1,5 @@
 import datetime
+from utils import numpy_compat
 from torch.utils.tensorboard import SummaryWriter
 from utils.config import *
 from utils.tvc import *
