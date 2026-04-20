@@ -11,6 +11,71 @@ from utils import Bar,  AverageMeter, accuracy
 import geoopt
 
 
+def canonicalize_encoding(encoding):
+    encoding = encoding.lower()
+    aliases = {
+        'hyper': 'hypergeometric',
+        'hyperencoding': 'hypergeometric',
+    }
+    encoding = aliases.get(encoding, encoding)
+    if encoding not in {'stod', 'hypergeometric'}:
+        raise ValueError(f'Unsupported encoding: {encoding}')
+    return encoding
+
+
+class HypergeometricRateEncoding(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inputs, time_step):
+        if torch.any((inputs < 0.0) | (inputs > 1.0)):
+            raise ValueError('Hypergeometric encoding expects inputs in [0, 1].')
+
+        remaining_mass = inputs * time_step
+        encoded = []
+        for t in range(1, time_step + 1):
+            remaining_slots = time_step - t + 1
+            spike_prob = torch.clamp(remaining_mass / remaining_slots, min=0.0, max=1.0)
+            spikes = torch.bernoulli(spike_prob)
+            remaining_mass = torch.clamp(remaining_mass - spikes, min=0.0, max=time_step - t)
+            encoded.append(spikes)
+
+        return torch.stack(encoded, dim=0)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.mean(dim=0), None
+
+
+class HypergeometricEncoder(nn.Module):
+    def __init__(self, T, mean=None, std=None):
+        super().__init__()
+        self.T = T
+        mean_tensor = torch.as_tensor(mean, dtype=torch.float32) if mean is not None else torch.tensor([], dtype=torch.float32)
+        std_tensor = torch.as_tensor(std, dtype=torch.float32) if std is not None else torch.tensor([], dtype=torch.float32)
+        self.register_buffer('mean', mean_tensor, persistent=False)
+        self.register_buffer('std', std_tensor, persistent=False)
+
+    def _stats(self, x):
+        if self.mean.numel() == 0 or self.std.numel() == 0:
+            return None, None
+        mean = self.mean.to(device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+        std = self.std.to(device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+        return mean, std
+
+    def forward(self, x):
+        mean, std = self._stats(x)
+        probs = x
+        if mean is not None and std is not None:
+            probs = probs * std + mean
+
+        probs = torch.clamp(probs, min=0.0, max=1.0)
+        spikes = HypergeometricRateEncoding.apply(probs, self.T)
+
+        if mean is not None and std is not None:
+            spikes = (spikes - mean.unsqueeze(0)) / std.unsqueeze(0)
+
+        return spikes
+
+
 
 
 class PatchwiseQModule(nn.Module):
@@ -41,7 +106,25 @@ class PatchwiseQModule(nn.Module):
             Q_t = self.Qs[t-1]
             xp = patches @ Q_t.T
             outs.append(self.fold(xp, Hp, Wp, B, H, W))
-        return outs
+        return torch.stack(outs, dim=0)
+
+
+def attach_input_encoder(model, encoding, c_in, p, time_step, normalization_mean=None, normalization_std=None):
+    encoding = canonicalize_encoding(encoding)
+
+    if hasattr(model, '_patch_module'):
+        model.encoding = encoding
+        return model._patch_module
+
+    if encoding == 'stod':
+        patch_module = PatchwiseQModule(c_in, p, time_step).cuda()
+        model.Q = patch_module.Qs
+    else:
+        patch_module = HypergeometricEncoder(time_step, normalization_mean, normalization_std).cuda()
+
+    model._patch_module = patch_module
+    model.encoding = encoding
+    return patch_module
 
 
 def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler, loss_lambda=0.0, attacker=None, writer=None, lr_orth=0.1, gor_lambda=0.1, p=16):
@@ -56,14 +139,6 @@ def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
     model.train()
     train_loss = train_acc = train_samples = 0
 
-    frame0, _ = next(iter(data))
-    _, C, H0, W0 = frame0.shape
-    if not hasattr(model, 'Q'):
-        patch_module = PatchwiseQModule(C, p, time_step).cuda()
-        model._patch_module = patch_module
-        model.Q = patch_module.Qs
-        optimizer.add_param_group({'params': list(patch_module.Qs.parameters()),'lr': optimizer.defaults['lr'] * lr_orth})
-
     for batch_idx, (frame, label) in enumerate(data, 1):
         frame = frame.float().cuda()
         label = label.cuda()
@@ -75,12 +150,11 @@ def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
         optimizer.zero_grad()
         out_all = []
         x_enc_flats = []
-        input_frame = frame
-        B, C, H, W = input_frame.shape
+        encoded_frames = model._patch_module(frame)
 
         for t in range(time_step):
             with amp.autocast():
-                x_enc = model._patch_module(input_frame)[t]
+                x_enc = encoded_frames[t]
                 x_flat = x_enc.reshape(frame.size(0), -1)
                 x_enc_flats.append(x_flat)
                 out = model(x_enc)
@@ -100,7 +174,7 @@ def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
                 loss = F.cross_entropy(out_all, label_real)
 
 
-            if gor_lambda > 0.0:
+            if gor_lambda > 0.0 and getattr(model, 'encoding', 'stod') == 'stod':
                 m_list = []
                 for Ft in x_enc_flats:
                     m = Ft.mean(dim=0)
@@ -174,9 +248,10 @@ def val(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
         if attacker is not None:
             frame = attacker(frame, label)
 
+        encoded_frames = model._patch_module(frame)
         out_all = []
         for t in range(time_step):
-            input_frame = model._patch_module(frame)[t]
+            input_frame = encoded_frames[t]
 
             with torch.no_grad():
                 out = model(input_frame)

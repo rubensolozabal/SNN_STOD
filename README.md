@@ -8,6 +8,13 @@
 ``` 
 python train.py -model 'vgg11' -dataset 'cifar10' -p 8 -gor_lambda 0.05
 ```
+
+To choose the input encoder explicitly, use `-encoding stod` or `-encoding hypergeometric`.
+
+```bash
+python train.py -model vgg11 -dataset cifar10 -encoding stod -p 8 -gor_lambda 0.05
+python train.py -model vgg11 -dataset cifar10 -encoding hypergeometric
+```
 ### Configuration
 
 Hyperparameters and dataset settings can be configured in `./utils/config.py`
