@@ -127,6 +127,21 @@ def attach_input_encoder(model, encoding, c_in, p, time_step, normalization_mean
     return patch_module
 
 
+def _temporal_classification_loss(logits_per_step, labels, encoding, loss_lambda=0.0):
+    if encoding == 'hypergeometric':
+        logits = torch.stack(logits_per_step, dim=0).mean(dim=0)
+        targets = labels
+    else:
+        logits = torch.cat(logits_per_step, dim=0)
+        targets = labels.repeat(len(logits_per_step))
+
+    if loss_lambda > 0.0:
+        label_one_hot = torch.zeros_like(logits).fill_(1.0).to(logits.device)
+        mse_loss = F.mse_loss(logits, label_one_hot)
+        return (1 - loss_lambda) * F.cross_entropy(logits, targets) + loss_lambda * mse_loss
+    return F.cross_entropy(logits, targets)
+
+
 def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler, loss_lambda=0.0, attacker=None, writer=None, lr_orth=0.1, gor_lambda=0.1, p=16):
 
     start_time = time.time()
@@ -142,7 +157,6 @@ def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
     for batch_idx, (frame, label) in enumerate(data, 1):
         frame = frame.float().cuda()
         label = label.cuda()
-        label_real = label.repeat(time_step)
 
         if attacker is not None:
             frame = attacker(frame, label)
@@ -164,15 +178,8 @@ def tra(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
                     total += out.detach().clone()
                 out_all.append(out)
 
-        out_all = torch.cat(out_all, dim=0)
         with amp.autocast():
-            if loss_lambda > 0.0:
-                label_one_hot = torch.zeros_like(out_all).fill_(1.0).to(out_all.device)
-                mse_loss = F.mse_loss(out_all, label_one_hot)
-                loss = (1 - loss_lambda) * F.cross_entropy(out_all, label_real) + loss_lambda * mse_loss
-            else:
-                loss = F.cross_entropy(out_all, label_real)
-
+            loss = _temporal_classification_loss(out_all, label, getattr(model, 'encoding', 'stod'), loss_lambda)
 
             if gor_lambda > 0.0 and getattr(model, 'encoding', 'stod') == 'stod':
                 m_list = []
@@ -243,7 +250,6 @@ def val(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
         batch_idx += 1
         frame = frame.float().cuda()
         label = label.cuda()
-        label_real = torch.cat([label for _ in range(time_step)], 0)
 
         if attacker is not None:
             frame = attacker(frame, label)
@@ -261,16 +267,8 @@ def val(model, dataset, data, time_step, epoch, optimizer, lr_scheduler, scaler,
                     total_frame += out.clone().detach()
                 out_all.append(out)
 
-        out_all = torch.cat(out_all, 0)
-
         with torch.no_grad():
-            if loss_lambda > 0.0:
-                label_one_hot = torch.zeros_like(out_all).fill_(1.0).to(out_all.device)
-                mse_loss = F.mse_loss(out_all, label_one_hot)
-                loss = (1 - loss_lambda) * F.cross_entropy(out_all, label_real) + loss_lambda * mse_loss
-            else:
-                loss = F.cross_entropy(out_all, label_real)
-
+            loss = _temporal_classification_loss(out_all, label, getattr(model, 'encoding', 'stod'), loss_lambda)
 
         batch_loss = loss.item()
         val_loss += loss.item() * label.numel()
